@@ -125,6 +125,13 @@ class CallHandler {
     // Unir al host a la room de la llamada
     socket.join(`call_${callId}`);
 
+    // Notificar al host con el callId generado
+    socket.emit('call_created', {
+      callId,
+      status: 'ringing',
+      invitedCount: available.length
+    });
+
     // Enviar notificación de llamada entrante a cada destinatario disponible
     for (const { userId, sockets } of available) {
       sockets.forEach(targetSocket => {
@@ -188,6 +195,7 @@ class CallHandler {
     this.io.to(`call_${call.callId}`).emit('call_participant_joined', {
       callId: call.callId,
       oderId,
+      userId: oderId,
       userName,
       participantCount: call.participants.size
     });
@@ -207,12 +215,16 @@ class CallHandler {
 
     console.log(`📤 Enviando answer a usuario ${targetUserId}`);
 
+    // Obtener el callId de la llamada activa si no viene en data
+    const userId = socket.userId;
+    const activeCallId = callId || this.userCalls.get(userId);
+
     const targetSockets = this.getUserSockets(targetUserId);
     targetSockets.forEach(targetSocket => {
       targetSocket.emit('call_answer', {
         answer,
         fromUserId: socket.userId,
-        callId
+        callId: activeCallId
       });
     });
 
@@ -221,6 +233,22 @@ class CallHandler {
     if (call && call.participants.has(socket.userId)) {
       call.participants.get(socket.userId).status = 'connected';
     }
+  }
+
+  // Manejar envío de offer a un peer específico (para mesh network)
+  handleCallOfferSend(socket, data) {
+    const { targetUserId, offer, callId } = data;
+
+    console.log(`📤 Enviando offer a usuario ${targetUserId} para llamada ${callId}`);
+
+    const targetSockets = this.getUserSockets(targetUserId);
+    targetSockets.forEach(targetSocket => {
+      targetSocket.emit('call_offer', {
+        offer,
+        callerId: socket.userId,
+        callId: callId
+      });
+    });
   }
 
   // Agregar participante a llamada en curso

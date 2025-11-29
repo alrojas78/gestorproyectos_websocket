@@ -109,6 +109,11 @@ io.on('connection', async (socket) => {
     callHandler.handleCallAnswerSend(socket, data);
   });
 
+  // Evento: Enviar offer a peer específico (para conexiones mesh en llamadas grupales)
+  socket.on('call_offer_send', (data) => {
+    callHandler.handleCallOfferSend(socket, data);
+  });
+
   // Evento: Enviar ICE candidate
   socket.on('call_ice_candidate', (data) => {
     callHandler.handleIceCandidate(socket, data);
