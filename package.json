@@ -1,0 +1,20 @@
+{
+  "name": "ateneo-websocket-server",
+  "version": "1.0.0",
+  "description": "WebSocket server for real-time chat",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.2",
+    "mysql2": "^3.6.5",
+    "dotenv": "^16.3.1",
+    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
