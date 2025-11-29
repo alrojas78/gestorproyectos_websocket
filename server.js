@@ -72,6 +72,16 @@ io.on('connection', async (socket) => {
     chatHandler.handleJoinConversation(socket, data);
   });
 
+  // Evento: Mensaje eliminado (notificar a otros)
+  socket.on('message_deleted', (data) => {
+    const { conversationId, messageId } = data;
+    socket.to(`conversation_${conversationId}`).emit('message_deleted', {
+      conversationId,
+      messageId,
+      deletedBy: socket.userId
+    });
+  });
+
   // ===== EVENTOS DE LLAMADAS =====
 
   // Evento: Solicitar llamada
@@ -102,6 +112,16 @@ io.on('connection', async (socket) => {
   // Evento: Enviar ICE candidate
   socket.on('call_ice_candidate', (data) => {
     callHandler.handleIceCandidate(socket, data);
+  });
+
+  // Evento: Agregar participante a llamada
+  socket.on('call_add_participant', (data) => {
+    callHandler.handleAddParticipant(socket, data);
+  });
+
+  // Evento: Obtener info de llamada actual
+  socket.on('call_get_info', () => {
+    callHandler.handleGetCallInfo(socket);
   });
 
   // ===== EVENTOS DE CONEXIÓN =====

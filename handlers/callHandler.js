@@ -3,8 +3,13 @@ const db = require('../config/database');
 class CallHandler {
   constructor(io) {
     this.io = io;
-    this.activeCalls = new Map(); // oderId -> { oderId, status, startTime }
-    this.userSockets = new Map(); // userId -> Set of socket ids
+    this.activeCalls = new Map(); // callId -> { callId, hostId, participants, status, startTime }
+    this.userCalls = new Map(); // oderId -> callId (para saber en qué llamada está cada usuario)
+  }
+
+  // Generar ID único para la llamada
+  generateCallId() {
+    return `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 
   // Obtener sockets de un usuario
@@ -20,12 +25,13 @@ class CallHandler {
 
   // Verificar si un usuario está en llamada
   isUserInCall(userId) {
-    for (const [callerId, call] of this.activeCalls) {
-      if (callerId === userId || call.targetUserId === userId) {
-        return true;
-      }
-    }
-    return false;
+    return this.userCalls.has(userId);
+  }
+
+  // Obtener la llamada de un usuario
+  getUserCall(userId) {
+    const callId = this.userCalls.get(userId);
+    return callId ? this.activeCalls.get(callId) : null;
   }
 
   // Obtener nombre del usuario
@@ -42,12 +48,33 @@ class CallHandler {
     }
   }
 
-  // Manejar solicitud de llamada
+  // Obtener info de múltiples usuarios
+  async getUsersInfo(userIds) {
+    try {
+      if (userIds.length === 0) return [];
+      const placeholders = userIds.map(() => '?').join(',');
+      const [rows] = await db.execute(
+        `SELECT id, name FROM users WHERE id IN (${placeholders})`,
+        userIds
+      );
+      return rows;
+    } catch (error) {
+      console.error('Error getting users info:', error);
+      return [];
+    }
+  }
+
+  // Manejar solicitud de llamada (puede ser a uno o varios usuarios)
   async handleCallRequest(socket, data) {
     const callerId = socket.userId;
-    const { targetUserId, offer } = data;
+    const { targetUserIds, offer } = data;
 
-    console.log(`📞 Llamada: Usuario ${callerId} -> Usuario ${targetUserId}`);
+    // Compatibilidad con llamadas individuales (targetUserId)
+    const targets = Array.isArray(targetUserIds)
+      ? targetUserIds
+      : [data.targetUserId];
+
+    console.log(`📞 Llamada grupal: Usuario ${callerId} -> Usuarios ${targets.join(', ')}`);
 
     // Verificar si el llamante ya está en una llamada
     if (this.isUserInCall(callerId)) {
@@ -55,148 +82,347 @@ class CallHandler {
       return;
     }
 
-    // Verificar si el destinatario está en una llamada
-    if (this.isUserInCall(targetUserId)) {
-      socket.emit('call_busy', { userId: targetUserId });
+    // Verificar disponibilidad de cada destinatario
+    const unavailable = [];
+    const available = [];
+
+    for (const targetId of targets) {
+      if (this.isUserInCall(targetId)) {
+        unavailable.push(targetId);
+      } else {
+        const targetSockets = this.getUserSockets(targetId);
+        if (targetSockets.length > 0) {
+          available.push({ userId: targetId, sockets: targetSockets });
+        } else {
+          unavailable.push(targetId);
+        }
+      }
+    }
+
+    if (available.length === 0) {
+      socket.emit('call_error', { message: 'Ningún usuario está disponible' });
       return;
     }
 
-    // Obtener sockets del destinatario
-    const targetSockets = this.getUserSockets(targetUserId);
-
-    if (targetSockets.length === 0) {
-      socket.emit('call_error', { message: 'Usuario no disponible' });
-      return;
-    }
-
-    // Obtener nombre del llamante
+    // Crear llamada grupal
+    const callId = this.generateCallId();
     const callerName = await this.getUserName(callerId);
 
-    // Registrar llamada activa
-    this.activeCalls.set(callerId, {
-      targetUserId,
+    const call = {
+      callId,
+      hostId: callerId,
+      hostName: callerName,
+      participants: new Map([[callerId, { oderId: callerId, status: 'connected', joinedAt: Date.now() }]]),
+      pendingInvites: new Set(available.map(a => a.userId)),
       status: 'ringing',
       startTime: Date.now(),
       offer
-    });
+    };
 
-    // Enviar notificación de llamada entrante al destinatario
-    targetSockets.forEach(targetSocket => {
-      targetSocket.emit('call_incoming', {
-        callerId,
-        callerName,
-        offer
+    this.activeCalls.set(callId, call);
+    this.userCalls.set(callerId, callId);
+
+    // Unir al host a la room de la llamada
+    socket.join(`call_${callId}`);
+
+    // Enviar notificación de llamada entrante a cada destinatario disponible
+    for (const { userId, sockets } of available) {
+      sockets.forEach(targetSocket => {
+        targetSocket.emit('call_incoming', {
+          callId,
+          callerId,
+          callerName,
+          isGroupCall: targets.length > 1,
+          participantCount: targets.length + 1,
+          offer
+        });
       });
-    });
+    }
 
-    console.log(`📞 Llamada enviada a ${targetSockets.length} socket(s) del usuario ${targetUserId}`);
+    // Notificar usuarios no disponibles
+    if (unavailable.length > 0) {
+      socket.emit('call_users_unavailable', { userIds: unavailable });
+    }
+
+    console.log(`📞 Llamada ${callId} creada. Invitados: ${available.length}, No disponibles: ${unavailable.length}`);
   }
 
   // Manejar aceptación de llamada
   async handleCallAccept(socket, data) {
-    const receiverId = socket.userId;
-    const { callerId } = data;
+    const oderId = socket.userId;
+    const { callerId, callId } = data;
 
-    console.log(`✅ Llamada aceptada: Usuario ${receiverId} aceptó llamada de ${callerId}`);
+    // Buscar la llamada por callId o por callerId (compatibilidad)
+    let call = callId ? this.activeCalls.get(callId) : null;
 
-    const call = this.activeCalls.get(callerId);
     if (!call) {
-      socket.emit('call_error', { message: 'Llamada no encontrada' });
-      return;
-    }
-
-    // Actualizar estado de la llamada
-    call.status = 'connecting';
-    this.activeCalls.set(callerId, call);
-
-    // Enviar la offer al que aceptó la llamada
-    socket.emit('call_offer', {
-      callerId,
-      offer: call.offer
-    });
-  }
-
-  // Manejar envío de respuesta SDP
-  handleCallAnswerSend(socket, data) {
-    const { targetUserId, answer } = data;
-
-    console.log(`📤 Enviando answer a usuario ${targetUserId}`);
-
-    const targetSockets = this.getUserSockets(targetUserId);
-    targetSockets.forEach(targetSocket => {
-      targetSocket.emit('call_answer', { answer });
-    });
-
-    // Actualizar estado de la llamada
-    const call = this.activeCalls.get(targetUserId);
-    if (call) {
-      call.status = 'connected';
-      this.activeCalls.set(targetUserId, call);
-    }
-  }
-
-  // Manejar rechazo de llamada
-  handleCallReject(socket, data) {
-    const receiverId = socket.userId;
-    const { callerId } = data;
-
-    console.log(`❌ Llamada rechazada: Usuario ${receiverId} rechazó llamada de ${callerId}`);
-
-    // Eliminar llamada activa
-    this.activeCalls.delete(callerId);
-
-    // Notificar al llamante
-    const callerSockets = this.getUserSockets(callerId);
-    callerSockets.forEach(callerSocket => {
-      callerSocket.emit('call_rejected', { userId: receiverId });
-    });
-  }
-
-  // Manejar fin de llamada
-  handleCallEnd(socket, data) {
-    const userId = socket.userId;
-    const { oderId, reason } = data;
-
-    console.log(`📴 Llamada terminada por usuario ${userId}, razón: ${reason}`);
-
-    // Buscar y eliminar la llamada activa
-    let callToEnd = null;
-    let callKey = null;
-
-    // Buscar si el usuario es el que inició la llamada
-    if (this.activeCalls.has(userId)) {
-      callToEnd = this.activeCalls.get(userId);
-      callKey = userId;
-    } else {
-      // Buscar si el usuario es el destinatario
-      for (const [callerId, call] of this.activeCalls) {
-        if (call.targetUserId === userId) {
-          callToEnd = call;
-          callKey = callerId;
+      // Buscar por callerId para compatibilidad con versión anterior
+      for (const [id, c] of this.activeCalls) {
+        if (c.hostId === callerId && c.pendingInvites.has(oderId)) {
+          call = c;
           break;
         }
       }
     }
 
-    if (callToEnd) {
-      this.activeCalls.delete(callKey);
-
-      // Notificar al otro usuario
-      const otherUserId = callKey === userId ? callToEnd.targetUserId : callKey;
-      const otherSockets = this.getUserSockets(otherUserId);
-      otherSockets.forEach(otherSocket => {
-        otherSocket.emit('call_ended', { reason: reason || 'ended' });
-      });
+    if (!call) {
+      socket.emit('call_error', { message: 'Llamada no encontrada' });
+      return;
     }
+
+    console.log(`✅ Llamada aceptada: Usuario ${oderId} se une a llamada ${call.callId}`);
+
+    // Registrar al usuario como participante
+    call.pendingInvites.delete(oderId);
+    call.participants.set(oderId, { oderId, status: 'connecting', joinedAt: Date.now() });
+    this.userCalls.set(oderId, call.callId);
+    call.status = 'active';
+
+    // Unir a la room de la llamada
+    socket.join(`call_${call.callId}`);
+
+    // Obtener nombre del usuario que se une
+    const userName = await this.getUserName(oderId);
+
+    // Notificar a todos los participantes que alguien se unió
+    this.io.to(`call_${call.callId}`).emit('call_participant_joined', {
+      callId: call.callId,
+      oderId,
+      userName,
+      participantCount: call.participants.size
+    });
+
+    // Enviar la offer al que aceptó la llamada
+    socket.emit('call_offer', {
+      callId: call.callId,
+      callerId: call.hostId,
+      offer: call.offer,
+      participants: Array.from(call.participants.keys())
+    });
+  }
+
+  // Manejar envío de respuesta SDP
+  handleCallAnswerSend(socket, data) {
+    const { targetUserId, answer, callId } = data;
+
+    console.log(`📤 Enviando answer a usuario ${targetUserId}`);
+
+    const targetSockets = this.getUserSockets(targetUserId);
+    targetSockets.forEach(targetSocket => {
+      targetSocket.emit('call_answer', {
+        answer,
+        fromUserId: socket.userId,
+        callId
+      });
+    });
+
+    // Actualizar estado del participante
+    const call = callId ? this.activeCalls.get(callId) : this.getUserCall(socket.userId);
+    if (call && call.participants.has(socket.userId)) {
+      call.participants.get(socket.userId).status = 'connected';
+    }
+  }
+
+  // Agregar participante a llamada en curso
+  async handleAddParticipant(socket, data) {
+    const { callId, targetUserId } = data;
+    const oderId = socket.userId;
+
+    const call = this.activeCalls.get(callId);
+    if (!call) {
+      socket.emit('call_error', { message: 'Llamada no encontrada' });
+      return;
+    }
+
+    // Verificar que el usuario es participante de la llamada
+    if (!call.participants.has(oderId)) {
+      socket.emit('call_error', { message: 'No eres participante de esta llamada' });
+      return;
+    }
+
+    // Verificar que el nuevo usuario no está ya en la llamada
+    if (call.participants.has(targetUserId) || call.pendingInvites.has(targetUserId)) {
+      socket.emit('call_error', { message: 'El usuario ya está en la llamada o fue invitado' });
+      return;
+    }
+
+    // Verificar disponibilidad del usuario
+    if (this.isUserInCall(targetUserId)) {
+      socket.emit('call_error', { message: 'El usuario está en otra llamada' });
+      return;
+    }
+
+    const targetSockets = this.getUserSockets(targetUserId);
+    if (targetSockets.length === 0) {
+      socket.emit('call_error', { message: 'El usuario no está disponible' });
+      return;
+    }
+
+    // Agregar a pendientes
+    call.pendingInvites.add(targetUserId);
+
+    // Obtener nombres
+    const inviterName = await this.getUserName(oderId);
+    const participantNames = await this.getUsersInfo(Array.from(call.participants.keys()));
+
+    // Notificar al usuario invitado
+    targetSockets.forEach(targetSocket => {
+      targetSocket.emit('call_incoming', {
+        callId,
+        callerId: call.hostId,
+        callerName: call.hostName,
+        invitedBy: inviterName,
+        isGroupCall: true,
+        participantCount: call.participants.size + 1,
+        participants: participantNames,
+        offer: call.offer
+      });
+    });
+
+    // Notificar a los participantes actuales
+    this.io.to(`call_${callId}`).emit('call_participant_invited', {
+      callId,
+      targetUserId,
+      invitedBy: oderId,
+      invitedByName: inviterName
+    });
+
+    console.log(`📞 Usuario ${targetUserId} invitado a llamada ${callId} por ${oderId}`);
+  }
+
+  // Manejar rechazo de llamada
+  handleCallReject(socket, data) {
+    const oderId = socket.userId;
+    const { callerId, callId } = data;
+
+    // Buscar la llamada
+    let call = callId ? this.activeCalls.get(callId) : null;
+
+    if (!call) {
+      for (const [id, c] of this.activeCalls) {
+        if (c.hostId === callerId && c.pendingInvites.has(oderId)) {
+          call = c;
+          break;
+        }
+      }
+    }
+
+    if (!call) return;
+
+    console.log(`❌ Llamada rechazada: Usuario ${oderId} rechazó llamada ${call.callId}`);
+
+    // Remover de pendientes
+    call.pendingInvites.delete(oderId);
+
+    // Notificar a participantes
+    this.io.to(`call_${call.callId}`).emit('call_participant_rejected', {
+      callId: call.callId,
+      oderId
+    });
+
+    // Si no quedan participantes ni pendientes además del host, terminar llamada
+    if (call.participants.size === 1 && call.pendingInvites.size === 0) {
+      this.endCall(call.callId, 'rejected');
+    }
+  }
+
+  // Manejar fin de llamada (usuario sale)
+  handleCallEnd(socket, data) {
+    const userId = socket.userId;
+    const { reason } = data;
+
+    const callId = this.userCalls.get(userId);
+    if (!callId) return;
+
+    const call = this.activeCalls.get(callId);
+    if (!call) return;
+
+    console.log(`📴 Usuario ${userId} salió de llamada ${callId}, razón: ${reason}`);
+
+    // Remover al usuario de participantes
+    call.participants.delete(userId);
+    this.userCalls.delete(userId);
+    socket.leave(`call_${callId}`);
+
+    // Notificar a otros participantes
+    const userName = socket.userName || 'Usuario';
+    this.io.to(`call_${callId}`).emit('call_participant_left', {
+      callId,
+      oderId: userId,
+      userName,
+      participantCount: call.participants.size,
+      reason
+    });
+
+    // Si era el host o no quedan participantes suficientes, terminar llamada
+    if (userId === call.hostId || call.participants.size < 1) {
+      this.endCall(callId, userId === call.hostId ? 'host_left' : 'ended');
+    }
+  }
+
+  // Terminar llamada completamente
+  endCall(callId, reason) {
+    const call = this.activeCalls.get(callId);
+    if (!call) return;
+
+    console.log(`📴 Terminando llamada ${callId}, razón: ${reason}`);
+
+    // Notificar a todos
+    this.io.to(`call_${callId}`).emit('call_ended', { callId, reason });
+
+    // Limpiar participantes
+    for (const [oderId] of call.participants) {
+      this.userCalls.delete(oderId);
+      const sockets = this.getUserSockets(oderId);
+      sockets.forEach(s => s.leave(`call_${callId}`));
+    }
+
+    // Limpiar pendientes
+    for (const oderId of call.pendingInvites) {
+      // Por si acaso estaban en proceso
+    }
+
+    this.activeCalls.delete(callId);
   }
 
   // Manejar ICE candidate
   handleIceCandidate(socket, data) {
-    const { targetUserId, candidate } = data;
+    const { targetUserId, candidate, callId } = data;
 
     const targetSockets = this.getUserSockets(targetUserId);
     targetSockets.forEach(targetSocket => {
-      targetSocket.emit('call_ice_candidate', { candidate });
+      targetSocket.emit('call_ice_candidate', {
+        candidate,
+        fromUserId: socket.userId,
+        callId
+      });
+    });
+  }
+
+  // Obtener info de la llamada actual
+  handleGetCallInfo(socket) {
+    const oderId = socket.userId;
+    const call = this.getUserCall(oderId);
+
+    if (!call) {
+      socket.emit('call_info', { inCall: false });
+      return;
+    }
+
+    const participants = [];
+    for (const [id, data] of call.participants) {
+      participants.push({ userId: id, ...data });
+    }
+
+    socket.emit('call_info', {
+      inCall: true,
+      callId: call.callId,
+      isHost: call.hostId === oderId,
+      hostId: call.hostId,
+      hostName: call.hostName,
+      participants,
+      pendingInvites: Array.from(call.pendingInvites),
+      startTime: call.startTime
     });
   }
 
@@ -205,33 +431,37 @@ class CallHandler {
     const userId = socket.userId;
 
     // Verificar si el usuario tenía una llamada activa
-    let callToEnd = null;
-    let callKey = null;
+    const callId = this.userCalls.get(userId);
+    if (!callId) return;
 
-    if (this.activeCalls.has(userId)) {
-      callToEnd = this.activeCalls.get(userId);
-      callKey = userId;
-    } else {
-      for (const [callerId, call] of this.activeCalls) {
-        if (call.targetUserId === userId) {
-          callToEnd = call;
-          callKey = callerId;
-          break;
-        }
-      }
+    const call = this.activeCalls.get(callId);
+    if (!call) return;
+
+    // Verificar si el usuario tiene otros sockets conectados
+    const remainingSockets = this.getUserSockets(userId).filter(s => s.id !== socket.id);
+
+    if (remainingSockets.length > 0) {
+      // Tiene otros sockets, mantener en llamada
+      return;
     }
 
-    if (callToEnd) {
-      this.activeCalls.delete(callKey);
+    console.log(`📴 Usuario ${userId} desconectado de llamada ${callId}`);
 
-      // Notificar al otro usuario
-      const otherUserId = callKey === userId ? callToEnd.targetUserId : callKey;
-      const otherSockets = this.getUserSockets(otherUserId);
-      otherSockets.forEach(otherSocket => {
-        otherSocket.emit('call_ended', { reason: 'disconnected' });
-      });
+    // Remover de participantes
+    call.participants.delete(userId);
+    this.userCalls.delete(userId);
 
-      console.log(`📴 Llamada terminada por desconexión del usuario ${userId}`);
+    // Notificar a otros
+    this.io.to(`call_${callId}`).emit('call_participant_left', {
+      callId,
+      oderId: userId,
+      participantCount: call.participants.size,
+      reason: 'disconnected'
+    });
+
+    // Si era el host o no quedan suficientes participantes, terminar
+    if (userId === call.hostId || call.participants.size < 1) {
+      this.endCall(callId, 'disconnected');
     }
   }
 }
