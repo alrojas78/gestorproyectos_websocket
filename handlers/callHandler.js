@@ -67,14 +67,15 @@ class CallHandler {
   // Manejar solicitud de llamada (puede ser a uno o varios usuarios)
   async handleCallRequest(socket, data) {
     const callerId = socket.userId;
-    const { targetUserIds, offer } = data;
+    const { targetUserIds, offer, callType } = data;
 
     // Compatibilidad con llamadas individuales (targetUserId)
     const targets = Array.isArray(targetUserIds)
       ? targetUserIds
       : [data.targetUserId];
 
-    console.log(`📞 Llamada grupal: Usuario ${callerId} -> Usuarios ${targets.join(', ')}`);
+    const callTypeLabel = callType === 'video' ? 'Videollamada' : 'Llamada';
+    console.log(`📞 ${callTypeLabel}: Usuario ${callerId} -> Usuarios ${targets.join(', ')}`);
 
     // Verificar si el llamante ya está en una llamada
     if (this.isUserInCall(callerId)) {
@@ -116,7 +117,8 @@ class CallHandler {
       pendingInvites: new Set(available.map(a => a.userId)),
       status: 'ringing',
       startTime: Date.now(),
-      offer
+      offer,
+      callType: callType || 'audio' // 'audio' o 'video'
     };
 
     this.activeCalls.set(callId, call);
@@ -129,7 +131,8 @@ class CallHandler {
     socket.emit('call_created', {
       callId,
       status: 'ringing',
-      invitedCount: available.length
+      invitedCount: available.length,
+      callType: call.callType
     });
 
     // Enviar notificación de llamada entrante a cada destinatario disponible
@@ -141,7 +144,8 @@ class CallHandler {
           callerName,
           isGroupCall: targets.length > 1,
           participantCount: targets.length + 1,
-          offer
+          offer,
+          callType: call.callType
         });
       });
     }
@@ -303,7 +307,8 @@ class CallHandler {
         isGroupCall: true,
         participantCount: call.participants.size + 1,
         participants: participantNames,
-        offer: call.offer
+        offer: call.offer,
+        callType: call.callType || 'audio'
       });
     });
 
