@@ -459,6 +459,35 @@ class CallHandler {
     });
   }
 
+  // Manejar mensaje de chat en llamada
+  handleCallChatMessage(socket, data) {
+    const userId = socket.userId;
+    const { callId, content, senderName } = data;
+
+    // Verificar que el usuario está en una llamada
+    const userCallId = this.userCalls.get(userId);
+    if (!userCallId || userCallId !== callId) {
+      socket.emit('call_error', { message: 'No estás en esta llamada' });
+      return;
+    }
+
+    const call = this.activeCalls.get(callId);
+    if (!call) {
+      return;
+    }
+
+    // Broadcast del mensaje a todos los participantes de la llamada (excepto al emisor)
+    socket.to(`call_${callId}`).emit('call_chat_message', {
+      callId,
+      senderId: userId,
+      senderName: senderName || 'Usuario',
+      content,
+      timestamp: Date.now()
+    });
+
+    console.log(`💬 Chat en llamada ${callId}: ${senderName || 'Usuario'}: ${content.substring(0, 50)}...`);
+  }
+
   // Manejar desconexión de usuario
   handleDisconnection(socket) {
     const userId = socket.userId;

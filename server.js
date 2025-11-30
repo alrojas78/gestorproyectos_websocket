@@ -129,6 +129,11 @@ io.on('connection', async (socket) => {
     callHandler.handleGetCallInfo(socket);
   });
 
+  // Evento: Mensaje de chat en llamada
+  socket.on('call_chat_message', (data) => {
+    callHandler.handleCallChatMessage(socket, data);
+  });
+
   // ===== EVENTOS DE CONEXIÓN =====
 
   // Evento: Desconexión
