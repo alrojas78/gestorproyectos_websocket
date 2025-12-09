@@ -5,6 +5,7 @@ const { Server } = require('socket.io');
 const { socketAuthMiddleware } = require('./middleware/auth');
 const ChatHandler = require('./handlers/chatHandler');
 const CallHandler = require('./handlers/callHandler');
+const SupportHandler = require('./handlers/supportHandler');
 
 const PORT = process.env.PORT || 3001;
 
@@ -23,12 +24,26 @@ const httpServer = createServer((req, res) => {
 // Configurar Socket.io
 const io = new Server(httpServer, {
   cors: {
-    origin: [
-      process.env.FRONTEND_URL,
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'https://d.ateneo.co'
-    ],
+    origin: (origin, callback) => {
+      // Permitir conexiones sin origin (apps móviles, Postman, etc.)
+      if (!origin) return callback(null, true);
+
+      // Dominios siempre permitidos
+      const allowedDomains = [
+        process.env.FRONTEND_URL,
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'https://d.ateneo.co'
+      ];
+
+      if (allowedDomains.includes(origin)) {
+        return callback(null, true);
+      }
+
+      // Para el widget de soporte, permitir cualquier origen
+      // La validación se hace con el embed_code en el handler
+      return callback(null, true);
+    },
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -36,12 +51,41 @@ const io = new Server(httpServer, {
   pingInterval: 25000
 });
 
-// Middleware de autenticación
+// Middleware de autenticación para namespace principal
 io.use(socketAuthMiddleware);
 
 // Inicializar handlers
 const chatHandler = new ChatHandler(io);
 const callHandler = new CallHandler(io);
+const supportHandler = new SupportHandler(io);
+
+// ===== NAMESPACE DE WIDGET (sin autenticación) =====
+const widgetNamespace = io.of('/support-widget');
+
+widgetNamespace.on('connection', (socket) => {
+  console.log(`[WIDGET] Nueva conexión de widget: ${socket.id}`);
+
+  // Widget se conecta a una sesión
+  socket.on('widget_connect', (data) => {
+    supportHandler.handleWidgetConnection(socket, data);
+  });
+
+  // Widget envía mensaje
+  socket.on('widget_message', (data) => {
+    supportHandler.handleWidgetMessage(socket, data);
+  });
+
+  // Widget indica que está escribiendo
+  socket.on('widget_typing', (data) => {
+    supportHandler.handleWidgetTyping(socket, data);
+  });
+
+  // Widget se desconecta
+  socket.on('disconnect', () => {
+    supportHandler.handleWidgetDisconnection(socket);
+    console.log(`[WIDGET] Widget desconectado: ${socket.id}`);
+  });
+});
 
 // Manejar conexiones
 io.on('connection', async (socket) => {
@@ -80,6 +124,28 @@ io.on('connection', async (socket) => {
       messageId,
       deletedBy: socket.userId
     });
+  });
+
+  // ===== EVENTOS DE SOPORTE (para agentes) =====
+
+  // Evento: Agente se conecta al sistema de soporte
+  socket.on('support_agent_connect', () => {
+    supportHandler.handleAgentConnection(socket);
+  });
+
+  // Evento: Agente se une a una sesión de soporte
+  socket.on('support_agent_join', (data) => {
+    supportHandler.handleAgentJoinSession(socket, data);
+  });
+
+  // Evento: Agente envía mensaje de soporte
+  socket.on('support_agent_message', (data) => {
+    supportHandler.handleAgentMessage(socket, data);
+  });
+
+  // Evento: Agente escribiendo
+  socket.on('support_agent_typing', (data) => {
+    supportHandler.handleAgentTyping(socket, data);
   });
 
   // ===== EVENTOS DE LLAMADAS =====
@@ -141,6 +207,7 @@ io.on('connection', async (socket) => {
     console.log(`Desconexión: Usuario ${socket.userId}, razón: ${reason}`);
     await chatHandler.handleDisconnection(socket);
     callHandler.handleDisconnection(socket);
+    supportHandler.handleAgentDisconnection(socket);
   });
 
   // Manejar errores
@@ -149,10 +216,14 @@ io.on('connection', async (socket) => {
   });
 });
 
+// Exportar supportHandler para uso en API (notificaciones de IA)
+module.exports = { io, supportHandler };
+
 // Iniciar servidor
 httpServer.listen(PORT, () => {
-  console.log(`🚀 WebSocket Server corriendo en puerto ${PORT}`);
-  console.log(`📡 Frontend URL: ${process.env.FRONTEND_URL}`);
+  console.log(`WebSocket Server corriendo en puerto ${PORT}`);
+  console.log(`Frontend URL: ${process.env.FRONTEND_URL}`);
+  console.log(`Support Widget namespace: /support-widget`);
 });
 
 // Manejar errores no capturados

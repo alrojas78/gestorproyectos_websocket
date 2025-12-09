@@ -50,11 +50,21 @@ class ChatHandler {
   // Enviar mensaje
   async handleSendMessage(socket, data) {
     try {
+      console.log(`[SEND_MESSAGE] Recibido de usuario ${socket.userId}:`, JSON.stringify(data));
+
       const { conversationId, content, messageType = 'text' } = data;
       const senderId = socket.userId;
 
+      if (!conversationId) {
+        console.error(`[SEND_MESSAGE] ERROR: conversationId es undefined. Data recibida:`, data);
+        socket.emit('error', { message: 'conversationId es requerido' });
+        return;
+      }
+
       // Validar que el usuario es participante
       const isParticipant = await this.checkParticipant(conversationId, senderId);
+      console.log(`[SEND_MESSAGE] Usuario ${senderId} es participante de conv ${conversationId}: ${isParticipant}`);
+
       if (!isParticipant) {
         socket.emit('error', { message: 'No tienes acceso a esta conversación' });
         return;
@@ -65,6 +75,12 @@ class ChatHandler {
 
       // Guardar mensaje en DB
       const message = await this.saveMessage(conversationId, senderId, sanitizedContent, messageType);
+      console.log(`[SEND_MESSAGE] Mensaje guardado con ID: ${message.id}`);
+
+      // Ver cuántos sockets están en la sala
+      const room = this.io.sockets.adapter.rooms.get(`conversation_${conversationId}`);
+      const socketsInRoom = room ? room.size : 0;
+      console.log(`[SEND_MESSAGE] Emitiendo a conversation_${conversationId} (${socketsInRoom} sockets en sala)`);
 
       // Emitir mensaje a todos los participantes de la conversación
       this.io.to(`conversation_${conversationId}`).emit('new_message', {
@@ -72,8 +88,10 @@ class ChatHandler {
         conversationId
       });
 
+      console.log(`[SEND_MESSAGE] Mensaje emitido exitosamente`);
+
     } catch (error) {
-      console.error('Error enviando mensaje:', error);
+      console.error('[SEND_MESSAGE] Error:', error);
       socket.emit('error', { message: 'Error al enviar mensaje' });
     }
   }
@@ -111,13 +129,26 @@ class ChatHandler {
 
   // Unirse a una conversación específica
   async handleJoinConversation(socket, data) {
+    console.log(`[JOIN_CONVERSATION] Recibido de usuario ${socket.userId}:`, JSON.stringify(data));
+
     const { conversationId } = data;
     const userId = socket.userId;
 
+    if (!conversationId) {
+      console.error(`[JOIN_CONVERSATION] ERROR: conversationId undefined. Data:`, data);
+      return;
+    }
+
     const isParticipant = await this.checkParticipant(conversationId, userId);
+    console.log(`[JOIN_CONVERSATION] Usuario ${userId} es participante: ${isParticipant}`);
+
     if (isParticipant) {
       socket.join(`conversation_${conversationId}`);
       socket.emit('joined_conversation', { conversationId });
+
+      // Verificar cuántos sockets hay en la sala ahora
+      const room = this.io.sockets.adapter.rooms.get(`conversation_${conversationId}`);
+      console.log(`[JOIN_CONVERSATION] Usuario ${userId} unido a conversation_${conversationId}. Total en sala: ${room ? room.size : 0}`);
     }
   }
 
