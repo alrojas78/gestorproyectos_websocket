@@ -3,6 +3,8 @@ const db = require('../config/database');
 class SupportHandler {
   constructor(io) {
     this.io = io;
+    // Referencia al namespace del widget
+    this.widgetNamespace = io.of('/support-widget');
     // Mapa de sesiones de widget: sessionToken -> Set of socket ids
     this.widgetSessions = new Map();
     // Mapa de agentes: agentId -> Set of socket ids
@@ -63,7 +65,7 @@ class SupportHandler {
   }
 
   // Agente se une a una sesión específica
-  handleAgentJoinSession(socket, data) {
+  async handleAgentJoinSession(socket, data) {
     const { sessionId } = data;
 
     if (!sessionId) {
@@ -74,8 +76,18 @@ class SupportHandler {
     socket.join(`support_session_${sessionId}`);
     console.log(`[SUPPORT] Agente ${socket.userId} unido a sesión ${sessionId}`);
 
+    // Resetear contador de no leídos cuando el agente abre la sesión
+    await this.resetUnreadCount(sessionId);
+
     // Notificar al cliente
     this.io.to(`support_session_${sessionId}`).emit('agent_joined', {
+      sessionId,
+      agentId: socket.userId,
+      timestamp: new Date()
+    });
+
+    // Notificar que los mensajes fueron leídos (para actualizar badges en otros clientes del agente)
+    this.io.to(`support_channel_${socket.supportChannelId}`).emit('support_session_read', {
       sessionId,
       agentId: socket.userId,
       timestamp: new Date()
@@ -116,8 +128,14 @@ class SupportHandler {
       // Actualizar última actividad de sesión
       await this.updateSessionActivity(sessionId);
 
-      // Emitir a todos en la sesión (widget y otros agentes)
+      // Emitir a todos en la sesión (namespace principal para agentes)
       this.io.to(`support_session_${sessionId}`).emit('support_message', {
+        sessionId,
+        message
+      });
+
+      // Emitir también al namespace del widget
+      this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_message', {
         sessionId,
         message
       });
@@ -134,13 +152,17 @@ class SupportHandler {
   handleAgentTyping(socket, data) {
     const { sessionId, isTyping } = data;
 
-    this.io.to(`support_session_${sessionId}`).emit('support_typing', {
+    const typingData = {
       sessionId,
       userId: socket.userId,
       userType: 'agent',
       isTyping,
       timestamp: new Date()
-    });
+    };
+
+    // Emitir a ambos namespaces
+    this.io.to(`support_session_${sessionId}`).emit('support_typing', typingData);
+    this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_typing', typingData);
   }
 
   // =====================================================
@@ -241,15 +263,25 @@ class SupportHandler {
       // Actualizar última actividad
       await this.updateSessionActivity(sessionId);
       await this.incrementMessageCount(sessionId);
+      // Incrementar contador de no leídos para agentes
+      await this.incrementUnreadCount(sessionId);
 
-      // Emitir a todos en la sesión
-      this.io.to(`support_session_${sessionId}`).emit('support_message', {
+      const messageData = {
         sessionId,
         message
-      });
+      };
 
-      // Notificar al canal (para lista de sesiones)
+      // Emitir a todos en la sesión (namespace principal para agentes que están viendo esa sesión)
+      this.io.to(`support_session_${sessionId}`).emit('support_message', messageData);
+
+      // Emitir también al namespace del widget (para otros widgets con la misma sesión)
+      this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_message', messageData);
+
+      // IMPORTANTE: Emitir también al canal para que TODOS los agentes del canal reciban la notificación
+      // aunque no estén viendo esa sesión específica
       if (socket.supportChannelId) {
+        this.io.to(`support_channel_${socket.supportChannelId}`).emit('support_message', messageData);
+
         this.io.to(`support_channel_${socket.supportChannelId}`).emit('session_updated', {
           sessionId,
           lastMessage: content,
@@ -257,7 +289,7 @@ class SupportHandler {
         });
       }
 
-      console.log(`[SUPPORT] Mensaje de cliente en sesión ${sessionId}`);
+      console.log(`[SUPPORT] Mensaje de cliente en sesión ${sessionId}, canal ${socket.supportChannelId}`);
 
     } catch (error) {
       console.error('[SUPPORT] Error enviando mensaje de widget:', error);
@@ -411,6 +443,20 @@ class SupportHandler {
   async incrementMessageCount(sessionId) {
     await db.query(
       `UPDATE support_sessions SET messages_count = messages_count + 1 WHERE id = ?`,
+      [sessionId]
+    );
+  }
+
+  async incrementUnreadCount(sessionId) {
+    await db.query(
+      `UPDATE support_sessions SET unread_count = unread_count + 1 WHERE id = ?`,
+      [sessionId]
+    );
+  }
+
+  async resetUnreadCount(sessionId) {
+    await db.query(
+      `UPDATE support_sessions SET unread_count = 0 WHERE id = ?`,
       [sessionId]
     );
   }
