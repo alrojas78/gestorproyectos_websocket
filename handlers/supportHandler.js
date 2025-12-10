@@ -165,6 +165,48 @@ class SupportHandler {
     this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_typing', typingData);
   }
 
+  // Agente cierra sesion (emitir evento de encuesta al widget)
+  async handleAgentCloseSession(socket, data) {
+    console.log(`[SUPPORT] handleAgentCloseSession llamado con data:`, data);
+    try {
+      const { sessionId } = data;
+      const agentId = socket.userId;
+
+      if (!sessionId) {
+        console.log(`[SUPPORT] Error: sessionId no proporcionado`);
+        socket.emit('support_error', { message: 'sessionId requerido' });
+        return;
+      }
+
+      // Verificar acceso
+      const hasAccess = await this.checkAgentSessionAccess(agentId, sessionId);
+      if (!hasAccess) {
+        console.log(`[SUPPORT] Error: Agente ${agentId} no tiene acceso a sesion ${sessionId}`);
+        socket.emit('support_error', { message: 'No tienes acceso a esta sesion' });
+        return;
+      }
+
+      // Obtener datos de la sesion
+      const session = await this.getSessionById(sessionId);
+      if (!session) {
+        console.log(`[SUPPORT] Error: Sesion ${sessionId} no encontrada`);
+        socket.emit('support_error', { message: 'Sesion no encontrada' });
+        return;
+      }
+
+      console.log(`[SUPPORT] Emitiendo evento de cierre para sesion ${sessionId}`);
+
+      // Emitir evento de cierre con solicitud de encuesta
+      this.broadcastSessionClosed(sessionId, 'agent', agentId);
+
+      console.log(`[SUPPORT] Agente ${agentId} cerro sesion ${sessionId} via WebSocket`);
+
+    } catch (error) {
+      console.error('[SUPPORT] Error cerrando sesion:', error);
+      socket.emit('support_error', { message: 'Error al cerrar sesion' });
+    }
+  }
+
   // =====================================================
   // CONEXIONES DE WIDGET (clientes externos)
   // =====================================================
@@ -241,6 +283,7 @@ class SupportHandler {
   async handleWidgetMessage(socket, data) {
     try {
       const sessionId = socket.supportSessionId;
+      const sessionToken = socket.supportSessionToken;
       const { content, messageType = 'text' } = data;
 
       if (!sessionId || !content) {
@@ -277,19 +320,24 @@ class SupportHandler {
       // Emitir también al namespace del widget (para otros widgets con la misma sesión)
       this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_message', messageData);
 
-      // IMPORTANTE: Emitir también al canal para que TODOS los agentes del canal reciban la notificación
-      // aunque no estén viendo esa sesión específica
+      // Notificar al canal solo con session_updated (para actualizar lista de sesiones)
+      // NO enviar support_message al canal porque causaría duplicados
       if (socket.supportChannelId) {
-        this.io.to(`support_channel_${socket.supportChannelId}`).emit('support_message', messageData);
-
         this.io.to(`support_channel_${socket.supportChannelId}`).emit('session_updated', {
           sessionId,
           lastMessage: content,
+          unreadCount: 1,
           timestamp: new Date()
         });
       }
 
       console.log(`[SUPPORT] Mensaje de cliente en sesión ${sessionId}, canal ${socket.supportChannelId}`);
+
+      // Procesar con IA llamando a la API PHP
+      if (sessionToken) {
+        this.processAIResponse(sessionId, sessionToken, content, socket)
+          .catch(err => console.error('[SUPPORT] Error procesando IA:', err));
+      }
 
     } catch (error) {
       console.error('[SUPPORT] Error enviando mensaje de widget:', error);
@@ -338,21 +386,111 @@ class SupportHandler {
     });
   }
 
-  // Notificar cierre de sesión
-  broadcastSessionClosed(sessionId) {
-    this.io.to(`support_session_${sessionId}`).emit('session_closed', {
+  // Notificar cierre de sesion y solicitar encuesta
+  broadcastSessionClosed(sessionId, closedBy = 'agent', closedById = null) {
+    const closeData = {
       sessionId,
+      closedBy,
+      closedById,
+      surveyRequested: true,
+      timestamp: new Date()
+    };
+
+    console.log(`[SUPPORT] broadcastSessionClosed: sessionId=${sessionId}, closedBy=${closedBy}`);
+
+    // Verificar si hay sockets en la room del widget
+    const widgetRoom = this.widgetNamespace.adapter.rooms.get(`support_session_${sessionId}`);
+    console.log(`[SUPPORT] Sockets en room widget support_session_${sessionId}:`, widgetRoom ? widgetRoom.size : 0);
+
+    // Emitir cierre a todos en la sesion (namespace principal)
+    this.io.to(`support_session_${sessionId}`).emit('session_closed', closeData);
+
+    // Emitir al namespace del widget para mostrar encuesta
+    this.widgetNamespace.to(`support_session_${sessionId}`).emit('session_closed', closeData);
+
+    // Emitir evento especifico de solicitud de encuesta al widget
+    this.widgetNamespace.to(`support_session_${sessionId}`).emit('survey_request', {
+      sessionId,
+      closedBy,
       timestamp: new Date()
     });
+
+    console.log(`[SUPPORT] Sesion ${sessionId} cerrada por ${closedBy}, encuesta solicitada`);
   }
 
-  // Notificar escalación
+  // Notificar escalacion
   broadcastSessionEscalated(sessionId, ticketNumber) {
     this.io.to(`support_session_${sessionId}`).emit('session_escalated', {
       sessionId,
       ticketNumber,
       timestamp: new Date()
     });
+  }
+
+  // Notificar que se completo una encuesta (para estadisticas en tiempo real)
+  broadcastSurveyCompleted(sessionId, channelId, rating) {
+    this.io.to(`support_channel_${channelId}`).emit('survey_completed', {
+      sessionId,
+      rating,
+      timestamp: new Date()
+    });
+    console.log(`[SUPPORT] Encuesta completada para sesion ${sessionId}, rating: ${rating}`);
+  }
+
+  // =====================================================
+  // PROCESAMIENTO DE IA
+  // =====================================================
+
+  async processAIResponse(sessionId, sessionToken, content, socket) {
+    try {
+      console.log(`[SUPPORT AI] Procesando mensaje para sesion ${sessionId}...`);
+
+      // Llamar a la API PHP para procesar con IA
+      const response = await fetch(`${process.env.API_BASE_URL || 'https://d.ateneo.co/backend/api'}/widget/message/ai`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          session_token: sessionToken,
+          content: content
+        })
+      });
+
+      const result = await response.json();
+      console.log(`[SUPPORT AI] Respuesta de API:`, result.success ? 'OK' : result.error);
+
+      if (result.success && result.ai_response) {
+        const aiMessage = result.ai_response;
+
+        // Emitir respuesta de IA al widget y agentes
+        const aiMessageData = {
+          sessionId,
+          message: {
+            ...aiMessage,
+            sender_type: 'ai',
+            sender_name: 'Asistente IA'
+          }
+        };
+
+        this.io.to(`support_session_${sessionId}`).emit('support_message', aiMessageData);
+        this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_message', aiMessageData);
+
+        console.log(`[SUPPORT AI] Respuesta enviada a sesion ${sessionId}`);
+
+        // Si la IA cerró la sesión, emitir evento de cierre y encuesta
+        if (aiMessage.session_closed && aiMessage.survey_requested) {
+          console.log(`[SUPPORT AI] Sesión ${sessionId} cerrada por IA, enviando encuesta...`);
+
+          // Pequeño delay para que el mensaje de despedida llegue primero
+          setTimeout(() => {
+            this.broadcastSessionClosed(sessionId, 'ai', null);
+          }, 500);
+        }
+      }
+    } catch (error) {
+      console.error('[SUPPORT AI] Error:', error.message);
+    }
   }
 
   // =====================================================

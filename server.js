@@ -148,6 +148,11 @@ io.on('connection', async (socket) => {
     supportHandler.handleAgentTyping(socket, data);
   });
 
+  // Evento: Agente cierra sesion (emite evento de encuesta al widget)
+  socket.on('support_agent_close_session', (data) => {
+    supportHandler.handleAgentCloseSession(socket, data);
+  });
+
   // ===== EVENTOS DE LLAMADAS =====
 
   // Evento: Solicitar llamada
