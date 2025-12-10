@@ -478,9 +478,37 @@ class SupportHandler {
 
         console.log(`[SUPPORT AI] Respuesta enviada a sesion ${sessionId}`);
 
-        // Si la IA cerró la sesión, emitir evento de cierre y encuesta
-        if (aiMessage.session_closed && aiMessage.survey_requested) {
-          console.log(`[SUPPORT AI] Sesión ${sessionId} cerrada por IA, enviando encuesta...`);
+        // Si la IA escaló la sesión, notificar a todos los agentes del canal
+        if (aiMessage.session_escalated) {
+          console.log(`[SUPPORT AI] Sesión ${sessionId} ESCALADA por IA, ticket: ${aiMessage.ticket_number}`);
+
+          // Obtener el canal de la sesión para notificar a los agentes
+          const session = await this.getSessionById(sessionId);
+          if (session) {
+            // Notificar a todos los agentes del canal sobre la escalación
+            this.io.to(`support_channel_${session.channel_id}`).emit('session_escalated', {
+              sessionId,
+              ticketNumber: aiMessage.ticket_number,
+              reason: aiMessage.escalation_reason,
+              priority: aiMessage.escalation_priority,
+              customerName: session.external_name,
+              timestamp: new Date()
+            });
+
+            // También actualizar la lista de sesiones para los agentes
+            this.io.to(`support_channel_${session.channel_id}`).emit('session_updated', {
+              sessionId,
+              status: 'escalated',
+              handled_by: 'agent',
+              timestamp: new Date()
+            });
+
+            console.log(`[SUPPORT AI] Notificación de escalación enviada al canal ${session.channel_id}`);
+          }
+        }
+        // Si la IA cerró la sesión (NO escaló), emitir evento de cierre y encuesta
+        else if (aiMessage.session_closed && aiMessage.survey_requested) {
+          console.log(`[SUPPORT AI] Sesión ${sessionId} CERRADA por IA, enviando encuesta...`);
 
           // Pequeño delay para que el mensaje de despedida llegue primero
           setTimeout(() => {
