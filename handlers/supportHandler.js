@@ -445,6 +445,16 @@ class SupportHandler {
     try {
       console.log(`[SUPPORT AI] Procesando mensaje para sesion ${sessionId}...`);
 
+      // Emitir indicador de "escribiendo" de la IA
+      const typingData = {
+        sessionId,
+        userType: 'ai',
+        isTyping: true,
+        timestamp: new Date()
+      };
+      this.io.to(`support_session_${sessionId}`).emit('support_typing', typingData);
+      this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_typing', typingData);
+
       // Llamar a la API PHP para procesar con IA
       const response = await fetch(`${process.env.API_BASE_URL || 'https://d.ateneo.co/backend/api'}/widget/message/ai`, {
         method: 'POST',
@@ -459,6 +469,16 @@ class SupportHandler {
 
       const result = await response.json();
       console.log(`[SUPPORT AI] Respuesta de API:`, result.success ? 'OK' : result.error);
+
+      // Detener indicador de "escribiendo"
+      const stopTypingData = {
+        sessionId,
+        userType: 'ai',
+        isTyping: false,
+        timestamp: new Date()
+      };
+      this.io.to(`support_session_${sessionId}`).emit('support_typing', stopTypingData);
+      this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_typing', stopTypingData);
 
       if (result.success && result.ai_response) {
         const aiMessage = result.ai_response;
@@ -518,6 +538,16 @@ class SupportHandler {
       }
     } catch (error) {
       console.error('[SUPPORT AI] Error:', error.message);
+
+      // Asegurar que se detenga el indicador de typing en caso de error
+      const stopTypingData = {
+        sessionId,
+        userType: 'ai',
+        isTyping: false,
+        timestamp: new Date()
+      };
+      this.io.to(`support_session_${sessionId}`).emit('support_typing', stopTypingData);
+      this.widgetNamespace.to(`support_session_${sessionId}`).emit('support_typing', stopTypingData);
     }
   }
 
