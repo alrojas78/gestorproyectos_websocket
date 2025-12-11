@@ -1,3 +1,7 @@
 node_modules/
 .env
 *.log
+
+# Firebase credentials (keep local only)
+config/firebase-service-account.json
+*-firebase-adminsdk-*.json

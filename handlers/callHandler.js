@@ -488,6 +488,32 @@ class CallHandler {
     console.log(`💬 Chat en llamada ${callId}: ${senderName || 'Usuario'}: ${content.substring(0, 50)}...`);
   }
 
+  // Manejar señal de screen share
+  handleScreenShare(socket, data) {
+    const userId = socket.userId;
+    const { callId, sharing } = data;
+
+    // Verificar que el usuario está en una llamada
+    const userCallId = this.userCalls.get(userId);
+    if (!userCallId || userCallId !== callId) {
+      return;
+    }
+
+    const call = this.activeCalls.get(callId);
+    if (!call) {
+      return;
+    }
+
+    // Broadcast a todos los participantes de la llamada (excepto al emisor)
+    socket.to(`call_${callId}`).emit('call_screen_share', {
+      callId,
+      userId,
+      sharing
+    });
+
+    console.log(`🖥️ Screen share en llamada ${callId}: Usuario ${userId} ${sharing ? 'inició' : 'detuvo'} compartir pantalla`);
+  }
+
   // Manejar desconexión de usuario
   handleDisconnection(socket) {
     const userId = socket.userId;

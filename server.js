@@ -205,6 +205,11 @@ io.on('connection', async (socket) => {
     callHandler.handleCallChatMessage(socket, data);
   });
 
+  // Evento: Screen share en llamada
+  socket.on('call_screen_share', (data) => {
+    callHandler.handleScreenShare(socket, data);
+  });
+
   // ===== EVENTOS DE CONEXIÓN =====
 
   // Evento: Desconexión

@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const pushService = require('../services/pushService');
 
 class ChatHandler {
   constructor(io) {
@@ -90,9 +91,42 @@ class ChatHandler {
 
       console.log(`[SEND_MESSAGE] Mensaje emitido exitosamente`);
 
+      // Enviar push notifications a usuarios offline
+      await this.sendPushToOfflineParticipants(conversationId, senderId, message);
+
     } catch (error) {
       console.error('[SEND_MESSAGE] Error:', error);
       socket.emit('error', { message: 'Error al enviar mensaje' });
+    }
+  }
+
+  // Enviar push a participantes offline
+  async sendPushToOfflineParticipants(conversationId, senderId, message) {
+    try {
+      // Obtener todos los participantes excepto el remitente
+      const [participants] = await db.execute(
+        'SELECT user_id FROM conversation_participants WHERE conversation_id = ? AND user_id != ?',
+        [conversationId, senderId]
+      );
+
+      if (participants.length === 0) {
+        return;
+      }
+
+      // Filtrar usuarios que estan offline
+      const offlineUserIds = [];
+      for (const p of participants) {
+        if (!this.isUserOnline(p.user_id)) {
+          offlineUserIds.push(p.user_id);
+        }
+      }
+
+      if (offlineUserIds.length > 0) {
+        console.log(`[SEND_MESSAGE] Enviando push a ${offlineUserIds.length} usuarios offline`);
+        await pushService.notifyNewChatMessage(message, conversationId, offlineUserIds);
+      }
+    } catch (error) {
+      console.error('[SEND_MESSAGE] Error enviando push:', error);
     }
   }
 
